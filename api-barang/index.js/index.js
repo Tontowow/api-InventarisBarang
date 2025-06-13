@@ -1,240 +1,258 @@
-// Import libraries
+// index.js
+
+// 1. Import semua library yang dibutuhkan
+require('dotenv').config();
 const express = require('express');
 const mysql = require('mysql2/promise');
-const dotenv = require('dotenv');
 const passport = require('passport');
 const GoogleStrategy = require('passport-google-oauth20').Strategy;
 const session = require('express-session');
 const multer = require('multer');
 const path = require('path');
-const fs = require('fs');
 const cors = require('cors');
-// Load environment variables
-dotenv.config();
 
-// Initialize Express app
+// 2. Inisialisasi Aplikasi Express
 const app = express();
-app.use(cors()); // Enable Cross-Origin Resource Sharing
-app.use(express.json()); // To parse JSON bodies
-app.use(express.urlencoded({ extended: true })); // To parse URL-encoded bodies
+const PORT = process.env.PORT || 3000;
 
-// Create uploads directory if it doesn't exist
-const uploadsDir = path.join(__dirname, 'uploads');
-if (!fs.existsSync(uploadsDir)) {
-    fs.mkdirSync(uploadsDir);
-}
+// 3. Konfigurasi Middleware
+app.use(cors()); // Mengizinkan request dari domain lain
+app.use(express.json()); // Mem-parse body JSON
+app.use(express.urlencoded({ extended: true })); // Mem-parse body URL-encoded
 
-// Serve static files from the 'uploads' directory
-app.use('/uploads', express.static(uploadsDir));
-
-// --- Database Connection ---
-const dbPool = mysql.createPool({
-    host: process.env.DB_HOST,
-      user: process.env.DB_USER,
-password: process.env.DB_PASSWORD,
-database: process.env.DB_NAME,
-waitForConnections: true,
-connectionLimit: 10,
-       queueLimit: 0
-});
-
-// --- Session and Passport Setup ---
+// Konfigurasi session
 app.use(session({
-    secret: process.env.SESSION_SECRET,
+    secret: process.env.SESSION_SECRET, // Kunci rahasia untuk session
     resave: false,
     saveUninitialized: true,
 }));
+
+// Inisialisasi Passport
 app.use(passport.initialize());
 app.use(passport.session());
 
+// Membuat folder 'uploads' bisa diakses secara publik
+app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
+
+// 4. Konfigurasi Database MySQL
+let db;
+async function connectDatabase() {
+    try {
+        db = await mysql.createPool({
+            host: process.env.MYSQLHOST,
+            user: process.env.MYSQLUSER,
+            password: process.env.MYSQLPASSWORD,
+            database: process.env.MYSQLDATABASE,
+            port: process.env.MYSQLPORT,
+            waitForConnections: true,
+            connectionLimit: 10,
+            queueLimit: 0
+        });
+        console.log('🎉 Terhubung ke database MySQL di Railway!');
+
+        // 5. Membuat tabel jika belum ada
+        await db.execute(`
+            CREATE TABLE IF NOT EXISTS users (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                googleId VARCHAR(255) NOT NULL UNIQUE,
+                displayName VARCHAR(255)
+            );
+        `);
+
+        await db.execute(`
+            CREATE TABLE IF NOT EXISTS barang (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                nama_barang VARCHAR(255) NOT NULL,
+                deskripsi_barang TEXT,
+                gambar VARCHAR(255)
+            );
+        `);
+        console.log('Tabel users dan barang siap digunakan.');
+    } catch (error) {
+        console.error('Gagal terhubung atau membuat tabel:', error);
+        process.exit(1); // Keluar dari aplikasi jika database gagal terhubung
+    }
+}
+
+// 6. Konfigurasi Passport.js dengan Google Strategy
+passport.use(new GoogleStrategy({
+    clientID: process.env.GOOGLE_CLIENT_ID,
+    clientSecret: process.env.GOOGLE_CLIENT_SECRET,
+    callbackURL: process.env.CALLBACK_URL
+  },
+  async (accessToken, refreshToken, profile, done) => {
+    try {
+        // Cek apakah user sudah ada di database
+        const [rows] = await db.execute('SELECT * FROM users WHERE googleId = ?', [profile.id]);
+        if (rows.length > 0) {
+            // User sudah ada
+            return done(null, rows[0]);
+        } else {
+            // User belum ada, buat user baru
+            const [result] = await db.execute('INSERT INTO users (googleId, displayName) VALUES (?, ?)', [profile.id, profile.displayName]);
+            const [newUser] = await db.execute('SELECT * FROM users WHERE id = ?', [result.insertId]);
+            return done(null, newUser[0]);
+        }
+    } catch (error) {
+        return done(error, null);
+    }
+  }
+));
+
+// Serialisasi dan Deserialisasi user untuk session
 passport.serializeUser((user, done) => {
-    done(null, user.google_id);
+    done(null, user.id);
 });
 
 passport.deserializeUser(async (id, done) => {
     try {
-        const [rows] = await dbPool.query('SELECT * FROM users WHERE google_id = ?', [id]);
+        const [rows] = await db.execute('SELECT * FROM users WHERE id = ?', [id]);
         done(null, rows[0]);
-    } catch (err) {
-        done(err, null);
+    } catch (error) {
+        done(error, null);
     }
 });
 
-passport.use(new GoogleStrategy({
-        clientID: process.env.GOOGLE_CLIENT_ID,
-        clientSecret: process.env.GOOGLE_CLIENT_SECRET,
-        callbackURL: `${process.env.APP_URL}/auth/google/callback`
-    },
-    async (accessToken, refreshToken, profile, done) => {
-        try {
-            const [existingUser] = await dbPool.query('SELECT * FROM users WHERE google_id = ?', [profile.id]);
-
-            if (existingUser.length > 0) {
-                return done(null, existingUser[0]);
-            }
-
-            const newUser = {
-                google_id: profile.id,
-                display_name: profile.displayName,
-                email: profile.emails[0].value
-            };
-            await dbPool.query('INSERT INTO users SET ?', newUser);
-            return done(null, newUser);
-        } catch (err) {
-            return done(err, null);
-        }
-    }
-));
-
-// --- Middleware to check if user is authenticated ---
-function isAuthenticated(req, res, next) {
+// 7. Middleware untuk Cek Login
+function isLoggedIn(req, res, next) {
     if (req.isAuthenticated()) {
         return next();
     }
-    res.status(401).json({ message: 'Unauthorized. Please login first.' });
+    res.status(401).json({ message: 'Akses ditolak. Silakan login terlebih dahulu.' });
 }
 
-// --- Image Upload (Multer) Setup ---
+// 8. Konfigurasi Multer untuk Upload Gambar
 const storage = multer.diskStorage({
-    destination: (req, file, cb) => {
-        cb(null, 'uploads/');
+    destination: function (req, file, cb) {
+        cb(null, 'uploads/'); // Folder penyimpanan gambar
     },
-    filename: (req, file, cb) => {
-        cb(null, `<span class="math-inline">\{Date\.now\(\)\}\-</span>{path.extname(file.originalname)}`);
+    filename: function (req, file, cb) {
+        // Membuat nama file unik: timestamp + nama asli
+        cb(null, Date.now() + path.extname(file.originalname));
     }
 });
 const upload = multer({ storage: storage });
 
-// --- Routes ---
+// === ROUTES ===
 
-// ## Authentication Routes ##
-app.get('/auth/google', passport.authenticate('google', { scope: ['profile', 'email'] }));
+// 9. Rute Otentikasi
+app.get('/', (req, res) => {
+    res.json({ message: 'Selamat datang di API Inventaris. Silakan login menggunakan /auth/google' });
+});
 
-app.get('/auth/google/callback',
-    passport.authenticate('google', { failureRedirect: '/login-failed' }),
-    (req, res) => {
-        res.redirect('/profile'); // Redirect to a profile page or send a success message
-    }
-);
+app.get('/auth/google',
+  passport.authenticate('google', { scope: ['profile', 'email'] }));
 
-app.get('/profile', isAuthenticated, (req, res) => {
-    res.json({ message: 'Welcome!', user: req.user });
+app.get('/auth/google/callback', 
+  passport.authenticate('google', { failureRedirect: '/' }),
+  (req, res) => {
+    // Redirect berhasil, bisa ke halaman depan atau kirim JSON
+    res.redirect('/profile');
+  });
+
+app.get('/profile', isLoggedIn, (req, res) => {
+    res.json({ message: `Halo, ${req.user.displayName}`, user: req.user });
 });
 
 app.get('/logout', (req, res, next) => {
     req.logout(function(err) {
         if (err) { return next(err); }
-        res.json({ message: 'Successfully logged out.' });
+        res.json({ message: 'Anda berhasil logout.' });
     });
 });
 
-// ## Barang (Item) CRUD Routes ##
-
-// GET all items (Public)
-app.get('/barang', async (req, res) => {
+// 10. Rute API CRUD untuk Barang (dilindungi)
+// GET semua barang
+app.get('/api/barang', isLoggedIn, async (req, res) => {
     try {
-        const [rows] = await dbPool.query('SELECT * FROM barang ORDER BY created_at DESC');
+        const [rows] = await db.query('SELECT * FROM barang');
         res.json(rows);
-    } catch (err) {
-        res.status(500).json({ message: 'Error fetching items', error: err.message });
+    } catch (error) {
+        res.status(500).json({ message: 'Error mengambil data barang', error: error.message });
     }
 });
 
-// GET one item by ID (Public)
-app.get('/barang/:id', async (req, res) => {
+// GET barang by ID
+app.get('/api/barang/:id', isLoggedIn, async (req, res) => {
     try {
-        const [rows] = await dbPool.query('SELECT * FROM barang WHERE id = ?', [req.params.id]);
+        const [rows] = await db.query('SELECT * FROM barang WHERE id = ?', [req.params.id]);
         if (rows.length === 0) {
-            return res.status(404).json({ message: 'Item not found' });
+            return res.status(404).json({ message: 'Barang tidak ditemukan' });
         }
         res.json(rows[0]);
-    } catch (err) {
-        res.status(500).json({ message: 'Error fetching item', error: err.message });
+    } catch (error) {
+        res.status(500).json({ message: 'Error mengambil data barang', error: error.message });
     }
 });
 
-// POST a new item (Protected)
-app.post('/barang', isAuthenticated, upload.single('gambar_barang'), async (req, res) => {
+// POST barang baru
+app.post('/api/barang', isLoggedIn, upload.single('gambar'), async (req, res) => {
     const { nama_barang, deskripsi_barang } = req.body;
-    if (!nama_barang) {
-        return res.status(400).json({ message: 'nama_barang is required' });
+    if (!nama_barang || !req.file) {
+        return res.status(400).json({ message: 'Nama barang dan gambar wajib diisi.' });
     }
-
-    const gambar_url = req.file ? `<span class="math-inline">\{process\.env\.APP\_URL\}/uploads/</span>{req.file.filename}` : null;
+    // URL gambar yang akan disimpan di database
+    const gambarUrl = `${req.protocol}://${req.get('host')}/uploads/${req.file.filename}`;
     
     try {
-        const [result] = await dbPool.query(
-            'INSERT INTO barang (nama_barang, deskripsi_barang, gambar_barang) VALUES (?, ?, ?)',
-            [nama_barang, deskripsi_barang, gambar_url]
+        const [result] = await db.execute(
+            'INSERT INTO barang (nama_barang, deskripsi_barang, gambar) VALUES (?, ?, ?)',
+            [nama_barang, deskripsi_barang, gambarUrl]
         );
-        res.status(201).json({ id: result.insertId, nama_barang, deskripsi_barang, gambar_barang: gambar_url });
-    } catch (err) {
-        res.status(500).json({ message: 'Error creating item', error: err.message });
+        res.status(201).json({ id: result.insertId, nama_barang, deskripsi_barang, gambar: gambarUrl });
+    } catch (error) {
+        res.status(500).json({ message: 'Error menyimpan data barang', error: error.message });
     }
 });
 
-// PUT/UPDATE an item by ID (Protected)
-app.put('/barang/:id', isAuthenticated, upload.single('gambar_barang'), async (req, res) => {
-    const { nama_barang, deskripsi_barang } = req.body;
+// PUT (update) barang
+app.put('/api/barang/:id', isLoggedIn, upload.single('gambar'), async (req, res) => {
     const { id } = req.params;
+    const { nama_barang, deskripsi_barang } = req.body;
+
+    let gambarUrl;
+    if(req.file) {
+        gambarUrl = `${req.protocol}://${req.get('host')}/uploads/${req.file.filename}`;
+    }
 
     try {
-        // Check if item exists
-        const [item] = await dbPool.query('SELECT * FROM barang WHERE id = ?', [id]);
-        if (item.length === 0) {
-            return res.status(404).json({ message: 'Item not found' });
-        }
-        
-        // Handle new image upload
-        let gambar_url = item[0].gambar_barang;
-        if (req.file) {
-             // Optionally delete old image file
-            if (item[0].gambar_barang) {
-                const oldFilename = path.basename(new URL(item[0].gambar_barang).pathname);
-                fs.unlink(path.join(uploadsDir, oldFilename), err => {
-                    if (err) console.error("Error deleting old file:", err.message);
-                });
-            }
-            gambar_url = `<span class="math-inline">\{process\.env\.APP\_URL\}/uploads/</span>{req.file.filename}`;
+        // Query dinamis tergantung apakah gambar diupdate atau tidak
+        let query;
+        let params;
+        if (gambarUrl) {
+            query = 'UPDATE barang SET nama_barang = ?, deskripsi_barang = ?, gambar = ? WHERE id = ?';
+            params = [nama_barang, deskripsi_barang, gambarUrl, id];
+        } else {
+            query = 'UPDATE barang SET nama_barang = ?, deskripsi_barang = ? WHERE id = ?';
+            params = [nama_barang, deskripsi_barang, id];
         }
 
-        await dbPool.query(
-            'UPDATE barang SET nama_barang = ?, deskripsi_barang = ?, gambar_barang = ? WHERE id = ?',
-            [nama_barang || item[0].nama_barang, deskripsi_barang || item[0].deskripsi_barang, gambar_url, id]
-        );
-        res.json({ message: 'Item updated successfully' });
-    } catch (err) {
-        res.status(500).json({ message: 'Error updating item', error: err.message });
+        const [result] = await db.execute(query, params);
+        if(result.affectedRows === 0) {
+            return res.status(404).json({ message: 'Barang tidak ditemukan' });
+        }
+        res.json({ message: 'Barang berhasil diupdate.' });
+    } catch (error) {
+        res.status(500).json({ message: 'Error mengupdate data barang', error: error.message });
     }
 });
 
-// DELETE an item by ID (Protected)
-app.delete('/barang/:id', isAuthenticated, async (req, res) => {
+// DELETE barang
+app.delete('/api/barang/:id', isLoggedIn, async (req, res) => {
     try {
-        // Find item to delete its image
-        const [item] = await dbPool.query('SELECT gambar_barang FROM barang WHERE id = ?', [req.params.id]);
-        if (item.length === 0) {
-            return res.status(404).json({ message: 'Item not found' });
+        const [result] = await db.execute('DELETE FROM barang WHERE id = ?', [req.params.id]);
+        if (result.affectedRows === 0) {
+            return res.status(404).json({ message: 'Barang tidak ditemukan' });
         }
-
-        // Delete image file if it exists
-        if (item[0].gambar_barang) {
-            const filename = path.basename(new URL(item[0].gambar_barang).pathname);
-            fs.unlink(path.join(uploadsDir, filename), err => {
-                if (err) console.error("Error deleting file:", err.message);
-            });
-        }
-        
-        // Delete from database
-        await dbPool.query('DELETE FROM barang WHERE id = ?', [req.params.id]);
-        res.json({ message: 'Item deleted successfully' });
-    } catch (err) {
-        res.status(500).json({ message: 'Error deleting item', error: err.message });
+        res.status(200).json({ message: 'Barang berhasil dihapus' });
+    } catch (error) {
+        res.status(500).json({ message: 'Error menghapus data barang', error: error.message });
     }
 });
 
-// --- Start Server ---
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-    console.log(`🚀 Server is running on http://localhost:${PORT}`);
+// 11. Jalankan server setelah koneksi database berhasil
+connectDatabase().then(() => {
+    app.listen(PORT, '0.0.0.0', () => {
+        console.log(`🚀 Server berjalan di port ${PORT}`);
+    });
 });
