@@ -64,7 +64,7 @@ async function connectDatabase() {
                 id INT AUTO_INCREMENT PRIMARY KEY,
                 nama_barang VARCHAR(255) NOT NULL,
                 deskripsi_barang TEXT,
-                gambar VARCHAR(255)
+                gambar_barang VARCHAR(255)
             );
         `);
         console.log('Tabel users dan barang siap digunakan.');
@@ -121,10 +121,10 @@ function isLoggedIn(req, res, next) {
     res.status(401).json({ message: 'Akses ditolak. Silakan login terlebih dahulu.' });
 }
 
-// 8. Konfigurasi Multer untuk Upload Gambar
+// 8. Konfigurasi Multer untuk Upload gambar_barang
 const storage = multer.diskStorage({
     destination: function (req, file, cb) {
-        cb(null, 'uploads/'); // Folder penyimpanan gambar
+        cb(null, 'uploads/'); // Folder penyimpanan gambar_barang
     },
     filename: function (req, file, cb) {
         // Membuat nama file unik: timestamp + nama asli
@@ -186,42 +186,42 @@ app.get('/api/barang/:id', isLoggedIn, async (req, res) => {
 });
 
 // POST barang baru
-app.post('/api/barang', isLoggedIn, upload.single('gambar'), async (req, res) => {
+app.post('/api/barang', isLoggedIn, upload.single('gambar_barang'), async (req, res) => {
     const { nama_barang, deskripsi_barang } = req.body;
     if (!nama_barang || !req.file) {
-        return res.status(400).json({ message: 'Nama barang dan gambar wajib diisi.' });
+        return res.status(400).json({ message: 'Nama barang dan gambar_barang wajib diisi.' });
     }
-    // URL gambar yang akan disimpan di database
-    const gambarUrl = `${req.protocol}://${req.get('host')}/uploads/${req.file.filename}`;
+    // URL gambar_barang yang akan disimpan di database
+    const gambar_barangUrl = `${req.protocol}://${req.get('host')}/uploads/${req.file.filename}`;
     
     try {
         const [result] = await db.execute(
-            'INSERT INTO barang (nama_barang, deskripsi_barang, gambar) VALUES (?, ?, ?)',
-            [nama_barang, deskripsi_barang, gambarUrl]
+            'INSERT INTO barang (nama_barang, deskripsi_barang, gambar_barang) VALUES (?, ?, ?)',
+            [nama_barang, deskripsi_barang, gambar_barangUrl]
         );
-        res.status(201).json({ id: result.insertId, nama_barang, deskripsi_barang, gambar: gambarUrl });
+        res.status(201).json({ id: result.insertId, nama_barang, deskripsi_barang, gambar_barang: gambar_barangUrl });
     } catch (error) {
         res.status(500).json({ message: 'Error menyimpan data barang', error: error.message });
     }
 });
 
 // PUT (update) barang
-app.put('/api/barang/:id', isLoggedIn, upload.single('gambar'), async (req, res) => {
+app.put('/api/barang/:id', isLoggedIn, upload.single('gambar_barang'), async (req, res) => {
     const { id } = req.params;
     const { nama_barang, deskripsi_barang } = req.body;
 
-    let gambarUrl;
+    let gambar_barangUrl;
     if(req.file) {
-        gambarUrl = `${req.protocol}://${req.get('host')}/uploads/${req.file.filename}`;
+        gambar_barangUrl = `${req.protocol}://${req.get('host')}/uploads/${req.file.filename}`;
     }
 
     try {
-        // Query dinamis tergantung apakah gambar diupdate atau tidak
+        // Query dinamis tergantung apakah gambar_barang diupdate atau tidak
         let query;
         let params;
-        if (gambarUrl) {
-            query = 'UPDATE barang SET nama_barang = ?, deskripsi_barang = ?, gambar = ? WHERE id = ?';
-            params = [nama_barang, deskripsi_barang, gambarUrl, id];
+        if (gambar_barangUrl) {
+            query = 'UPDATE barang SET nama_barang = ?, deskripsi_barang = ?, gambar_barang = ? WHERE id = ?';
+            params = [nama_barang, deskripsi_barang, gambar_barangUrl, id];
         } else {
             query = 'UPDATE barang SET nama_barang = ?, deskripsi_barang = ? WHERE id = ?';
             params = [nama_barang, deskripsi_barang, id];
